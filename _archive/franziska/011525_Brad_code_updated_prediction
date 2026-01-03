@@ -1,0 +1,199 @@
+library(shiny)
+library(ggplot2)
+library(ggExtra)
+library(shinythemes)
+library(bslib)
+
+# Load the prepared data
+load("model_results_2.RData")
+
+# Define base plot function
+make_base_plot <- function() {
+  p3a <- ggplot(data=sig.corpus, aes(x=Abundance)) +
+    geom_ribbon(aes(ymin=Conf2.5, ymax=Conf97.5), fill="#005AB5", alpha=.2) +
+    geom_segment(data=lds, aes(x=Abundance, xend=Abundance, y=1, yend=mx),
+                 color="grey65", linetype="dotdash", linewidth=1) +
+    geom_segment(data=lds, aes(x=10, xend=Abundance, y=mx, yend=mx),
+                 color="grey65", linetype="dotdash", linewidth=1) +
+    geom_line(aes(y=Median), color="#005AB5", linewidth=1) +
+    geom_point(aes(y=Richness, size=size, shape=shape), color="grey75") +
+    geom_text(data=lds, aes(x=10, y=mx+1, label=lab), vjust=0, hjust=0, size=5) +
+    geom_text(data=lds, aes(x=Abundance, y=1, label=round(Abundance,0)), vjust=1, hjust=0, size=5) +
+    scale_x_continuous(breaks=c(10,100,1000,10000,30000), trans="log10") +
+    scale_y_continuous("Richness", trans="log10") +
+    scale_size_identity() +
+    scale_shape_identity() +
+    theme_minimal() +
+    theme(
+      axis.title = element_text(face="bold", size=12),
+      axis.text = element_text(size=10),
+      plot.margin = unit(c(0.2, 0.2, 0.2, 0.2), "cm")
+    )
+  return(p3a)
+}
+
+ui <- fluidPage(
+  theme = bs_theme(version = 5),
+  titlePanel("The Levenson Index 🐝"),
+  sidebarLayout(
+    sidebarPanel(
+      width = 3,
+      h4("Set Your Study Design"),
+      numericInput("num_sites", "Number of Sites", 
+                   min = 1, max = 100, value = 1),
+      sliderInput("study_duration", "Study Duration (years)",
+                  min = 1, max = 10, value = 1),
+      
+      # Collection method selection
+      radioButtons("sampling_method", "Collection Method",
+                   choices = c("Visual", "Net", "Pan"), selected = "Visual"),
+      
+      # Conditional panels for sampling time based on collection method
+      conditionalPanel(
+        condition = "input.sampling_method != 'Pan'",
+        sliderInput("sampling_time_minutes", "Sampling Time (minutes)",
+                    min = 10, max = 120, value = 10)
+      ),
+      conditionalPanel(
+        condition = "input.sampling_method == 'Pan'",
+        sliderInput("sampling_time_days", "Sampling Time (days)",
+                    min = 0.17, max = 7, value = 0.17, step = 0.01)
+      ),
+      
+      sliderInput("trips_per_year", "Trips per Year",
+                  min = 1, max = 22, value = 1),
+      
+      radioButtons("Least.Specific.N", "Level of Identification",
+                   choices = c("Genus", "Family", "Species", "Morphospecies"),
+                   selected = "Genus"),
+      
+      hr(),
+      h4("Predictions"),
+      verbatimTextOutput("predictions")
+    ),
+    mainPanel(
+      width = 9,
+      fluidRow(
+        column(8,
+               plotOutput("abundance_richness_plot", height = "600px")
+        ),
+        column(4,
+               div(
+                 style = "background-color: #f8f9fa; padding: 15px; border-radius: 5px; margin-top: 20px;",
+                 h4("Study Predictions", style = "color: #005AB5;"),
+                 uiOutput("prediction_text"),
+                 hr(),
+                 p("Note about predictions:", style = "font-weight: bold;"),
+                 p("These predictions are based on patterns from historical studies, but bee communities can be highly variable. Our model captures some of this variation (R² = 0.296), but local conditions and other factors may lead to different outcomes.")
+               )
+        )
+      )
+    )
+  )
+)
+
+server <- function(input, output, session) {
+  
+  # Get sampling time in minutes regardless of input method
+  get_sampling_time <- reactive({
+    if (input$sampling_method == "Pan") {
+      return(input$sampling_time_days * 24 * 60)  # Convert days to minutes
+    } else {
+      return(input$sampling_time_minutes)
+    }
+  })
+  
+  # Step 1: Predict abundance using log-linear model
+  predict_abundance <- reactive({
+    is_visual <- as.numeric(input$sampling_method == "Visual")
+    sampling_time <- get_sampling_time()
+    
+    pred <- abundance_model_coefficients["(Intercept)"] +
+      abundance_model_coefficients["No..of.Years"] * log(input$study_duration) +
+      abundance_model_coefficients["No..of.Sites..Avg."] * log(input$num_sites) +
+      abundance_model_coefficients["Sampling.Time.min"] * log(sampling_time) +
+      abundance_model_coefficients["Visual"] * is_visual +
+      abundance_model_coefficients["Sampling.Time.min:Visual"] * log(sampling_time) * is_visual
+    
+    return(exp(pred))
+  })
+  
+  # Step 2: Predict richness using exponential model
+  predict_richness <- reactive({
+    abundance_pred <- predict_abundance()
+    
+    # Parameters from the NLS model
+    mx <- 143.0  # Maximum asymptote
+    rc <- 1.786e-4  # Rate constant
+    
+    # Calculate base richness using exponential function
+    base_richness <- mx * (1 - exp(-rc * abundance_pred))
+    
+    # Step 3: Adjust richness based on sampling method and identification level
+    is_visual <- as.numeric(input$sampling_method == "Visual")
+    is_species <- as.numeric(input$Least.Specific.N == "Species")
+    
+    # Apply adjustments from the residual model
+    adjustment <- richness_model_coefficients["(Intercept)"] +
+      richness_model_coefficients["Start.Year"] * 2023 +
+      richness_model_coefficients["No..of.Sites..Avg."] * input$num_sites +
+      richness_model_coefficients["Sample.Trips.Year..Avg."] * input$trips_per_year +
+      richness_model_coefficients["Visual"] * is_visual +
+      richness_model_coefficients["Species"] * is_species
+    
+    final_richness <- base_richness + adjustment
+    return(max(0, final_richness))
+  })
+  
+  output$abundance_richness_plot <- renderPlot({
+    abundance_pred <- predict_abundance()
+    richness_pred <- predict_richness()
+    
+    base_plot <- make_base_plot() +
+      geom_hline(yintercept = richness_pred, color = "firebrick", 
+                 linetype = "dashed", alpha = 0.5) +
+      geom_vline(xintercept = abundance_pred, color = "firebrick", 
+                 linetype = "dashed", alpha = 0.5) +
+      annotate("text", x = abundance_pred, y = 1, 
+               label = sprintf("Abundance: %.0f", abundance_pred),
+               color = "firebrick", vjust = 2, hjust = 0) +
+      annotate("text", y = richness_pred, x = 10,
+               label = sprintf("Richness: %.0f", richness_pred),
+               color = "firebrick", vjust = -0.5, hjust = 0) +
+      geom_point(data = data.frame(x = abundance_pred, y = richness_pred),
+                 aes(x = x, y = y),
+                 color = "firebrick", size = 10, shape = 15, alpha = 0.3) +
+      geom_point(data = data.frame(x = abundance_pred, y = richness_pred),
+                 aes(x = x, y = y),
+                 color = "firebrick", size = 3, shape = 15)
+    
+    ggMarginal(
+      base_plot,
+      type = "histogram",
+      fill = "grey75",
+      color = "grey75",
+      size = 3,
+      margins = "both",
+      xparams = list(bins = 30),
+      yparams = list(bins = 30)
+    )
+  })
+  
+  output$prediction_text <- renderUI({
+    abundance_pred <- round(predict_abundance(), 0)
+    richness_pred <- round(predict_richness(), 0)
+    
+    HTML(sprintf(
+      "<p>Your study design is predicted to detect:</p>
+       <ul>
+         <li><strong>%d</strong> individual bees</li>
+         <li><strong>%d</strong> different taxa</li>
+       </ul>",
+      abundance_pred,
+      richness_pred
+    ))
+  })
+}
+
+
+shinyApp(ui = ui, server = server)

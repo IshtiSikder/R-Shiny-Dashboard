@@ -1,0 +1,12 @@
+name: R-Shiny-Bees
+title: R-Shiny-Bees
+username: ofum1y-franziska-bickel
+account: ofum1y-franziska-bickel
+server: shinyapps.io
+hostUrl: https://api.shinyapps.io/v1
+appId: 13848709
+bundleId: 9719839
+url: https://ofum1y-franziska-bickel.shinyapps.io/R-Shiny-Bees/
+version: 1
+asMultiple: FALSE
+asStatic: FALSE
